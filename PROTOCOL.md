@@ -524,6 +524,7 @@ Captured Android actions:
 ```text
 custom face 1 -> ClockId 984
 custom face 2 -> ClockId 986
+Win00 built-in clock -> ClockId 1084
 ```
 
 The app sends JSON command `Channel/SetClockSelectId` as generic command `0x01`.
@@ -541,6 +542,7 @@ CLI:
 ```bash
 .venv/bin/python tools/divoom_clock.py custom1
 .venv/bin/python tools/divoom_clock.py custom2
+.venv/bin/python tools/divoom_clock.py win00
 # or any explicit clock id:
 .venv/bin/python tools/divoom_clock.py 984
 ```
