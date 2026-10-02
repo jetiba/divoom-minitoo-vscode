@@ -16,7 +16,12 @@ DEFAULT_USER_ID = 404779143
 
 
 def submit(host: str, port: int, packets_path: Path, delay: float = 0.012, dry_run: bool = False) -> dict:
-    req = {"packets": str(packets_path.resolve()), "delay": delay, "dryRun": dry_run}
+    req = {
+        "packets": str(packets_path.resolve()),
+        "delay": delay,
+        "dryRun": dry_run,
+        "requireAck": False,
+    }
     with socket.create_connection((host, port), timeout=10) as s:
         s.sendall(json.dumps(req).encode() + b"\n")
         s.shutdown(socket.SHUT_WR)
@@ -57,7 +62,7 @@ def build_select_clock_packet(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Select a Divoom custom clock face over the RFCOMM daemon")
-    parser.add_argument("clock", help="clock id or shortcut: 1/custom1=984, 2/custom2=986")
+    parser.add_argument("clock", help="clock id or shortcut: win00=1084, 1/custom1=984, 2/custom2=986")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=40583)
     parser.add_argument("--out-dir", type=Path, default=Path("captures/mac-send"))
@@ -69,7 +74,15 @@ def main() -> int:
     parser.add_argument("--user-id", type=int, default=DEFAULT_USER_ID)
     args = parser.parse_args()
 
-    shortcuts = {"1": 984, "custom1": 984, "face1": 984, "2": 986, "custom2": 986, "face2": 986}
+    shortcuts = {
+        "win00": 1084,
+        "1": 984,
+        "custom1": 984,
+        "face1": 984,
+        "2": 986,
+        "custom2": 986,
+        "face2": 986,
+    }
     clock_id = shortcuts.get(args.clock.lower(), None)
     if clock_id is None:
         clock_id = int(args.clock)

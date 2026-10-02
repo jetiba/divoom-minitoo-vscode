@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import IOBluetooth
 
 final class DivoomMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -10,14 +11,23 @@ final class DivoomMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var daemonProcess: Process?
     var statusItemViewTimer: Timer?
     var lastMessage = "Ready"
+    var agentStateController: AgentStateController?
+    var telemetryTailer: CopilotTelemetryTailer?
+    var promptMonitor: VSCodePromptMonitor?
+    var idleClockScheduler: IdleClockRestoreScheduler?
+    var displayedAgentState: AgentDisplayState?
+    let displayQueue = DispatchQueue(label: "divoom.agent-display")
+    let logLock = NSLock()
 
-    let address = "B1:21:81:B1:F0:84"
+    var address = "B1:21:81:B1:F0:84"
     let channel = "1"
     let daemonPort = "40583"
     var menuLog: URL { supportDir.appendingPathComponent("divoom-menubar.log") }
     var daemonLog: URL { supportDir.appendingPathComponent("divoom-menubar-daemon.log") }
     var daemonPidFile: URL { supportDir.appendingPathComponent("divoom-menubar-daemon.pid") }
     var capturesDir: URL { supportDir.appendingPathComponent("captures/mac-send") }
+    var copilotTelemetryFile: URL { supportDir.appendingPathComponent("copilot-otel.jsonl") }
+    var agentAssetsDir: URL { repo.appendingPathComponent("agent-assets", isDirectory: true) }
 
     override init() {
         let fm = FileManager.default
@@ -40,7 +50,11 @@ final class DivoomMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        if let discoveredAddress = discoverDivoomAddress() {
+            address = discoveredAddress
+        }
         appendLog("menubar started repo=\(repo.path)")
+        appendLog("using Divoom address=\(address)")
         statusItem.button?.title = "◈ Divoom"
         menu.delegate = self
         rebuildMenu()
@@ -48,13 +62,21 @@ final class DivoomMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItemViewTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.refreshTitle()
         }
+        startAgentDashboard()
         refreshTitle()
         startDaemon(disconnectFirst: true)
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        telemetryTailer?.stop()
+        promptMonitor?.stop()
+        idleClockScheduler?.cancel()
+    }
+
     func refreshTitle() {
         let running = isDaemonRunning()
-        statusItem.button?.title = running ? "◆ Divoom" : "◇ Divoom"
+        let state = agentStateController?.state.title ?? AgentDisplayState.idle.title
+        statusItem.button?.title = running ? "◆ Divoom · \(state)" : "◇ Divoom"
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -67,8 +89,20 @@ final class DivoomMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let audioConnected = isAudioConnected()
         menu.removeAllItems()
         menu.addItem(disabled("Daemon: \(daemonRunning ? "Running" : "Stopped")"))
+        menu.addItem(disabled("Device: \(address)"))
         menu.addItem(disabled("Audio profile: \(audioConnected ? "Connected" : "Disconnected")"))
+        menu.addItem(disabled("Agent: \(agentStateController?.state.title ?? AgentDisplayState.idle.title)"))
+        menu.addItem(disabled("Copilot telemetry: \(copilotTelemetryFile.path)"))
+        menu.addItem(disabled("Input detection: \(promptMonitor?.isTrusted == true ? "Enabled" : "Needs Accessibility permission")"))
         menu.addItem(disabled("Last: \(shortStatus(lastMessage))"))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(item("Copy Copilot OTel Settings", #selector(copyCopilotSettings)))
+        menu.addItem(item("Enable Accessibility Detection…", #selector(enableAccessibilityDetection), enabled: promptMonitor?.isTrusted != true))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(item("Preview: Working", #selector(previewWorking), enabled: daemonRunning))
+        menu.addItem(item("Preview: Asking Input", #selector(previewAskingInput), enabled: daemonRunning))
+        menu.addItem(item("Preview: Completed", #selector(previewCompleted), enabled: daemonRunning))
+        menu.addItem(item("Preview: Idle", #selector(previewIdle), enabled: daemonRunning))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(item("Send Image/GIF/Video…", #selector(sendImage), enabled: daemonRunning))
         menu.addItem(item("Activate Custom Face 1", #selector(activateCustomFace1), enabled: daemonRunning))
@@ -119,6 +153,29 @@ final class DivoomMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
+    func discoverDivoomAddress() -> String? {
+        guard let devices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else { return nil }
+        return devices.first {
+            ($0.name ?? "").localizedCaseInsensitiveContains("Divoom MiniToo")
+        }?.addressString?.uppercased()
+    }
+
+    func bluetoothDevice() -> IOBluetoothDevice? {
+        IOBluetoothDevice(addressString: address)
+    }
+
+    func disconnectDevice() -> String? {
+        guard let device = bluetoothDevice() else { return "Bluetooth device not found: \(address)" }
+        let result = device.closeConnection()
+        return result == kIOReturnSuccess ? nil : "Bluetooth disconnect failed: 0x\(String(result, radix: 16))"
+    }
+
+    func reconnectDevice() -> String? {
+        guard let device = bluetoothDevice() else { return "Bluetooth device not found: \(address)" }
+        let result = device.openConnection()
+        return result == kIOReturnSuccess ? nil : "Bluetooth reconnect failed: 0x\(String(result, radix: 16))"
+    }
+
     func run(_ executable: String, _ args: [String], wait: Bool = true) -> (Int32, String) {
         appendLog("run \(executable) \(args.joined(separator: " ")) wait=\(wait)")
         let p = Process()
@@ -146,15 +203,13 @@ final class DivoomMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
            kill(pid, 0) == 0 {
             return true
         }
-        let daemonPath = toolRoot.appendingPathComponent("divoom-daemon").path.replacingOccurrences(of: "'", with: "'\\''")
-        let (code, _) = run("/bin/sh", ["-lc", "pgrep -f '\(daemonPath)' >/dev/null || pgrep -f 'divoom-daemon' >/dev/null"], wait: true)
+        let daemonPath = toolRoot.appendingPathComponent("divoom-daemon").path
+        let (code, _) = run("/usr/bin/pgrep", ["-f", daemonPath], wait: true)
         return code == 0
     }
 
     func isAudioConnected() -> Bool {
-        guard let blueutil = executablePath("blueutil") else { return false }
-        let (code, out) = run(blueutil, ["--is-connected", address], wait: true)
-        return code == 0 && out.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
+        bluetoothDevice()?.isConnected() == true
     }
 
     func setStatus(_ message: String) {
@@ -166,10 +221,95 @@ final class DivoomMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    func startAgentDashboard() {
+        let controller = AgentStateController()
+        controller.onStateChange = { [weak self] state in
+            self?.agentStateChanged(state)
+        }
+        agentStateController = controller
+        let clockScheduler = IdleClockRestoreScheduler { [weak self] in
+            self?.restoreDefaultClockAfterIdle()
+        }
+        idleClockScheduler = clockScheduler
+        clockScheduler.stateChanged(.idle)
+
+        let telemetry = CopilotTelemetryTailer(fileURL: copilotTelemetryFile) { [weak self, weak controller] event in
+            switch event {
+            case .started(let id):
+                self?.appendLog("copilot telemetry started id=\(id)")
+                controller?.agentStarted(id: id)
+            case .completed(let id):
+                self?.appendLog("copilot telemetry completed id=\(id)")
+                controller?.agentCompleted(id: id)
+            }
+        }
+        telemetryTailer = telemetry
+        telemetry.start()
+
+        let accessibility = VSCodePromptMonitor(
+            onChange: { [weak self, weak controller] waiting in
+                self?.appendLog("copilot input prompt waiting=\(waiting)")
+                controller?.setWaitingForInput(waiting)
+            },
+            onActivityChange: { [weak self, weak controller] active, label in
+                self?.appendLog("copilot UI active=\(active) control=\(label ?? "-")")
+                controller?.setUIAgentActive(active)
+            },
+            onTrustChange: { [weak self] trusted in
+                self?.appendLog("accessibility trusted=\(trusted)")
+            }
+        )
+        promptMonitor = accessibility
+        if !accessibility.isTrusted {
+            accessibility.requestAccess()
+        }
+        accessibility.start()
+        appendLog("agent dashboard started telemetry=\(copilotTelemetryFile.path) accessibility=\(accessibility.isTrusted)")
+    }
+
+    func agentStateChanged(_ state: AgentDisplayState) {
+        appendLog("agent state \(state.rawValue)")
+        idleClockScheduler?.stateChanged(state)
+        DispatchQueue.main.async {
+            self.refreshTitle()
+            self.rebuildMenu()
+        }
+        sendAgentState(state)
+    }
+
+    func sendAgentState(_ state: AgentDisplayState, force: Bool = false) {
+        displayQueue.async {
+            if !force, self.displayedAgentState == state { return }
+            guard self.isDaemonRunning() else {
+                self.setStatus("Agent \(state.title); daemon not running")
+                return
+            }
+            let client = self.toolRoot.appendingPathComponent("divoom_status.py").path
+            guard FileManager.default.isExecutableFile(atPath: "/usr/bin/python3"),
+                  FileManager.default.fileExists(atPath: client),
+                  FileManager.default.fileExists(atPath: self.agentAssetsDir.path) else {
+                self.setStatus("Agent status assets or client missing")
+                return
+            }
+            let (code, out) = self.run(
+                "/usr/bin/python3",
+                [client, state.rawValue, "--asset-dir", self.agentAssetsDir.path]
+            )
+            if code == 0 {
+                self.displayedAgentState = state
+                self.setStatus("Agent \(state.title) displayed")
+            } else {
+                self.setStatus("Agent display issue: \(String(out.suffix(500)))")
+            }
+        }
+    }
+
     func startDaemon(disconnectFirst: Bool) {
         DispatchQueue.global(qos: .userInitiated).async {
-            if disconnectFirst, let blueutil = self.executablePath("blueutil") {
-                _ = self.run(blueutil, ["--disconnect", self.address])
+            if disconnectFirst {
+                if let error = self.disconnectDevice() {
+                    self.appendLog(error)
+                }
             }
             Thread.sleep(forTimeInterval: disconnectFirst ? 1.5 : 0.0)
             if self.isDaemonRunning() {
@@ -200,6 +340,8 @@ final class DivoomMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Thread.sleep(forTimeInterval: 2.0)
                 if self.isDaemonRunning() {
                     self.setStatus("Daemon started")
+                    self.sendAgentState(self.agentStateController?.state ?? .idle, force: true)
+                    self.idleClockScheduler?.stateChanged(self.agentStateController?.state ?? .idle)
                 } else {
                     let logText = (try? String(contentsOf: log, encoding: .utf8)) ?? ""
                     try? FileManager.default.removeItem(at: self.daemonPidFile)
@@ -219,7 +361,12 @@ final class DivoomMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.global(qos: .userInitiated).async {
             self.daemonProcess?.terminate()
             self.daemonProcess = nil
-            _ = self.run("/usr/bin/pkill", ["-f", "divoom-daemon"])
+            if let pidText = try? String(contentsOf: self.daemonPidFile, encoding: .utf8),
+               let pid = Int32(pidText.trimmingCharacters(in: .whitespacesAndNewlines)),
+               pid > 0,
+               kill(pid, 0) == 0 {
+                kill(pid, SIGTERM)
+            }
             try? FileManager.default.removeItem(at: self.daemonPidFile)
             self.setStatus("Daemon stopped")
         }
@@ -233,25 +380,54 @@ final class DivoomMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) { self.startDaemon(disconnectFirst: true) }
     }
 
+    @objc func copyCopilotSettings() {
+        let settings: [String: Any] = [
+            "github.copilot.chat.otel.enabled": true,
+            "github.copilot.chat.otel.exporterType": "file",
+            "github.copilot.chat.otel.captureContent": false,
+            "github.copilot.chat.otel.outfile": copilotTelemetryFile.path
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            setStatus("Could not create Copilot settings")
+            return
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        setStatus("Copilot OTel settings copied")
+    }
+
+    @objc func enableAccessibilityDetection() {
+        promptMonitor?.requestAccess()
+        setStatus("Grant Accessibility access, then relaunch the app")
+    }
+
+    @objc func previewWorking() { previewAgentState(.working) }
+    @objc func previewAskingInput() { previewAgentState(.askingInput) }
+    @objc func previewCompleted() { previewAgentState(.completed) }
+    @objc func previewIdle() { previewAgentState(.idle) }
+
+    func previewAgentState(_ state: AgentDisplayState) {
+        sendAgentState(state, force: true)
+    }
+
     @objc func disconnectAudioMenu() {
         DispatchQueue.global().async {
-            guard let blueutil = self.executablePath("blueutil") else {
-                self.setStatus("blueutil not found")
-                return
+            if let error = self.disconnectDevice() {
+                self.setStatus(error)
+            } else {
+                self.setStatus("Audio disconnected")
             }
-            let (_, out) = self.run(blueutil, ["--disconnect", self.address])
-            self.setStatus(out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Audio disconnected" : out)
         }
     }
 
     @objc func reconnectAudioMenu() {
         DispatchQueue.global().async {
-            guard let blueutil = self.executablePath("blueutil") else {
-                self.setStatus("blueutil not found")
-                return
+            if let error = self.reconnectDevice() {
+                self.setStatus(error)
+            } else {
+                self.setStatus("Audio reconnect requested")
             }
-            let (_, out) = self.run(blueutil, ["--connect", self.address])
-            self.setStatus(out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Audio reconnect requested" : out)
         }
     }
 
@@ -276,7 +452,7 @@ final class DivoomMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    func activateClock(_ shortcut: String) {
+    func activateClock(_ shortcut: String, successMessage: String? = nil) {
         DispatchQueue.global(qos: .userInitiated).async {
             if !self.isDaemonRunning() {
                 self.setStatus("Daemon not running")
@@ -285,10 +461,16 @@ final class DivoomMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let venvPy = self.repo.appendingPathComponent(".venv/bin/python").path
             let py = FileManager.default.isExecutableFile(atPath: venvPy) ? venvPy : (self.executablePath("python3") ?? "/usr/bin/python3")
             let client = self.toolRoot.appendingPathComponent("divoom_clock.py").path
-            let (code, out) = self.run(py, [client, shortcut])
+            let (code, out) = self.run(py, [client, shortcut, "--out-dir", self.capturesDir.path])
             let detail = String(out.suffix(700))
-            self.setStatus(code == 0 ? "Activated custom face \(shortcut)" : "Clock issue: \(detail)")
+            self.setStatus(code == 0 ? (successMessage ?? "Activated custom face \(shortcut)") : "Clock issue: \(detail)")
         }
+    }
+
+    func restoreDefaultClockAfterIdle() {
+        guard agentStateController?.state == .idle else { return }
+        appendLog("Copilot idle for 5 minutes; restoring Win00 clock")
+        activateClock("win00", successMessage: "Restored Win00 clock after 5 minutes idle")
     }
 
     @objc func activateCustomFace1() { activateClock("custom1") }
@@ -322,9 +504,13 @@ final class DivoomMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func notify(_ title: String, detail: String = "") { setStatus(detail.isEmpty ? title : "\(title): \(detail)") }
 
     func appendLog(_ line: String) {
+        logLock.lock()
+        defer { logLock.unlock() }
         let ts = ISO8601DateFormatter().string(from: Date())
         let text = "[\(ts)] \(line)\n"
-        FileManager.default.createFile(atPath: menuLog.path, contents: nil)
+        if !FileManager.default.fileExists(atPath: menuLog.path) {
+            FileManager.default.createFile(atPath: menuLog.path, contents: nil)
+        }
         if let h = try? FileHandle(forWritingTo: menuLog) {
             h.seekToEndOfFile()
             h.write(Data(text.utf8))
@@ -333,7 +519,12 @@ final class DivoomMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 }
 
-let app = NSApplication.shared
-let delegate = DivoomMenuBar()
-app.delegate = delegate
-app.run()
+@main
+struct DivoomMiniTooApp {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = DivoomMenuBar()
+        app.delegate = delegate
+        app.run()
+    }
+}

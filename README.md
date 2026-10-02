@@ -2,9 +2,17 @@
 
 Tools for sending images, GIFs, and short videos to a **Divoom MiniToo** over Bluetooth Classic RFCOMM from macOS.
 
-The core of this repo is a Swift daemon that keeps the Divoom app channel open, plus a small macOS menu-bar app and Python media conversion tooling.
+The core of this repo is a Swift daemon that keeps the Divoom app channel open, plus a small macOS menu-bar app, a Copilot agent-status dashboard, and Python media conversion tooling.
 
 > `omo-slim/` contains local working media/assets and is not the main project API. The reusable project is the daemon, menu-bar app, CLI, and protocol notes.
+
+## Upstream and attribution
+
+This project is derived from [alvinunreal/divoom-minitoo-osx](https://github.com/alvinunreal/divoom-minitoo-osx) by Alvin Unreal. The original Git history is preserved. This version adds the Pixel Pilot agent-status dashboard, VS Code Accessibility-based state detection, automatic paired-device discovery, precompiled status animations, tests, and reproducible Python packaging.
+
+The upstream repository does not currently declare an open-source license. A GitHub fork preserves the clearest attribution and repository relationship; obtain the upstream author's permission or an explicit license before redistributing this derivative outside the GitHub fork network.
+
+GitHub Copilot and Divoom are trademarks of their respective owners. This project is an independent integration and is not affiliated with or endorsed by GitHub or Divoom.
 
 ## What this does
 
@@ -13,34 +21,37 @@ The core of this repo is a Swift daemon that keeps the Divoom app channel open, 
 - Converts PNG/JPEG/GIF/MP4/video into the Divoom animation payload format.
 - Sends jobs through a localhost daemon at `127.0.0.1:40583`.
 - Provides a copyable macOS `.app` that starts the daemon from the menu bar.
+- Displays VS Code Copilot agent states as original Pixel Pilot animations: working, asking for input, completed, and idle.
 
 ## Device assumptions
 
-The current defaults are for one tested device:
+The menu-bar app discovers a paired device whose Bluetooth name contains `Divoom MiniToo`. The protocol defaults remain available for direct CLI use:
 
 ```text
 Bluetooth name: Divoom MiniToo-Audio
-Bluetooth MAC:  B1:21:81:B1:F0:84
+Fallback MAC:   B1:21:81:B1:F0:84
 RFCOMM channel: 1
 Daemon port:    40583
 ```
 
-If your device has a different Bluetooth address, update the address in the Swift tools or pass it manually to `tools/divoom-daemon`.
+If auto-discovery is unavailable, pass your device address manually to `tools/divoom-daemon`.
 
 ## Requirements
 
 - macOS
 - Xcode Command Line Tools / Swift compiler
-- Homebrew `blueutil` for audio-profile disconnect/reconnect convenience:
-
-```bash
-brew install blueutil
-```
+- Bluetooth access for the menu-bar app when macOS prompts for it
 
 For development CLI use:
 
 - Python virtualenv with `Pillow`, `zstandard`, and `pyserial`
 - `ffmpeg` for GIF/video input
+
+Create the project Python environment with:
+
+```bash
+tools/setup-python-env.sh
+```
 
 The packaged app bundles the repo `.venv`, so normal app usage does not need the active shell Python environment.
 
@@ -65,9 +76,11 @@ open "/Applications/Divoom MiniToo.app"
 
 On launch, the app:
 
-1. Disconnects the Divoom macOS audio profile once using `blueutil`.
+1. Disconnects the Divoom macOS audio profile using the native IOBluetooth framework.
 2. Starts the Swift RFCOMM daemon.
 3. Keeps the daemon available from the menu bar.
+4. Uses macOS Accessibility, when granted, to detect active Copilot execution and permission/input prompts.
+5. Optionally watches Copilot OpenTelemetry as a fallback when the VS Code build exports complete agent traces.
 
 Logs and generated packet artifacts are written under:
 
@@ -89,15 +102,51 @@ Useful actions:
 - **Send Image/GIF/Video…** — choose a media file and send it.
 - **Disconnect Audio + Start Daemon** — use when macOS audio owns the Bluetooth connection.
 - **Restart Daemon** — stop, disconnect audio, and reopen RFCOMM.
+- **Copy Copilot OTel Settings** — copy the required privacy-preserving VS Code settings.
+- **Enable Accessibility Detection…** — request permission to detect visible confirmation controls.
+- **Preview: …** — send any dashboard state to the device without running an agent.
 - **Open Menu Log / Open Daemon Log** — inspect failures.
+
+## Copilot agent dashboard
+
+The dashboard primarily uses a local macOS Accessibility check:
+
+```text
+Visible Stop/Cancel control    -> working
+Visible permission/input card -> asking input
+Stop/Cancel control disappears -> completed
+Eight seconds later           -> idle
+Five minutes idle             -> built-in Win00 clock (ClockId 1084)
+```
+
+No prompt or response content is read. The app only observes enabled control roles and labels in the VS Code UI.
+
+To detect permission prompts, choose **Enable Accessibility Detection…**, grant access to **Divoom MiniToo** in **System Settings → Privacy & Security → Accessibility**, and relaunch the app. The app only detects prompt controls; it never approves a permission or submits input.
+
+The **Copy Copilot OTel Settings** action remains available as an optional fallback for VS Code builds that export `copilot_chat.session.start` and `invoke_agent` records correctly. It is not required for the Accessibility-driven dashboard.
+
+When several agents are active, the display priority is:
+
+```text
+asking input > working > completed > idle
+```
+
+After five uninterrupted minutes in the idle state, the app activates the built-in Win00 clock (`ClockId=1084`) once. New Copilot activity cancels the pending timer and immediately replaces the clock with the appropriate Pixel Pilot animation. Each later return to idle starts a fresh five-minute timer.
+
+The original Pixel Pilot assets are generated by:
+
+```bash
+python3 tools/generate_agent_assets.py
+```
+
+This creates preview GIFs and precompiled packet files in `agent-assets/`. Precompiled packets keep state changes fast and avoid runtime media conversion.
 
 ## CLI usage
 
 Start the daemon manually:
 
 ```bash
-blueutil --disconnect B1:21:81:B1:F0:84 || true
-tools/divoom-daemon B1:21:81:B1:F0:84 1 40583
+tools/divoom-daemon <MINITOO_MAC> 1 40583
 ```
 
 Send media through the daemon:
@@ -220,10 +269,14 @@ This matches Android captures and avoids black/glitched output seen with larger 
 PROTOCOL.md                  Reverse-engineering and validation notes
 tools/DivoomDaemon.swift     Swift RFCOMM daemon
 tools/DivoomMenuBar.swift    macOS menu-bar controller
+tools/AgentDashboard.swift   Copilot telemetry, state aggregation, and permission detection
 tools/divoom_send.py         Preferred media send CLI
+tools/divoom_status.py       Sends a precompiled dashboard state
+tools/generate_agent_assets.py  Generates Pixel Pilot animations and packets
 tools/send_divoom_image.py   Image/GIF/video conversion + packet builder
 tools/divoom_clock.py        Custom face selection helper
 tools/build-divoom-app.sh    Builds packaged macOS app
+agent-assets/                Pixel Pilot previews and precompiled Divoom packets
 omo-slim/                    Local test/media assets; not core project API
 ```
 
@@ -232,7 +285,7 @@ omo-slim/                    Local test/media assets; not core project API
 If daemon start fails with an RFCOMM error, disconnect the audio profile once:
 
 ```bash
-blueutil --disconnect B1:21:81:B1:F0:84
+Disconnect the MiniToo audio profile from macOS Bluetooth settings.
 ```
 
 Then restart the daemon or reopen the app.

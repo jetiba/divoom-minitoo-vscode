@@ -8,9 +8,13 @@ import sys
 import time
 from pathlib import Path
 
-import serial
 import zstandard as zstd
 from PIL import Image, ImageEnhance, ImageOps
+
+try:
+    import serial
+except ImportError:
+    serial = None
 
 
 CMD_APP_NEW_GIF_2020 = 0x8B
@@ -300,6 +304,8 @@ def read_available(ser: serial.Serial, wait: float = 0.25) -> bytes:
 
 
 def send_packets(port: str, packets: list[bytes], delay: float, wait_request: bool) -> None:
+    if serial is None:
+        raise RuntimeError("pyserial is required for direct serial sends; install the project requirements")
     print(f"opening {port}...")
     with serial.Serial(port, baudrate=115200, timeout=0.2, write_timeout=3) as ser:
         time.sleep(1.0)

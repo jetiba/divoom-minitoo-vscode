@@ -1,0 +1,42 @@
+[
+  {
+    "status": "idle",
+    "frames": 8,
+    "frame_ms": 125,
+    "payload_bytes": 467,
+    "packet_count": 3,
+    "packet_bytes": 507,
+    "preview": "idle-preview.gif",
+    "packets": "idle-packets-lenpref.bin"
+  },
+  {
+    "status": "working",
+    "frames": 8,
+    "frame_ms": 125,
+    "payload_bytes": 655,
+    "packet_count": 4,
+    "packet_bytes": 709,
+    "preview": "working-preview.gif",
+    "packets": "working-packets-lenpref.bin"
+  },
+  {
+    "status": "asking-input",
+    "frames": 8,
+    "frame_ms": 125,
+    "payload_bytes": 492,
+    "packet_count": 3,
+    "packet_bytes": 532,
+    "preview": "asking-input-preview.gif",
+    "packets": "asking-input-packets-lenpref.bin"
+  },
+  {
+    "status": "completed",
+    "frames": 8,
+    "frame_ms": 125,
+    "payload_bytes": 873,
+    "packet_count": 5,
+    "packet_bytes": 941,
+    "preview": "completed-preview.gif",
+    "packets": "completed-packets-lenpref.bin"
+  }
+]

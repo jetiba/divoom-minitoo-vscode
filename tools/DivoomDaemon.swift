@@ -15,6 +15,7 @@ struct JobRequest: Codable {
     let packets: String?
     let delay: Double?
     let dryRun: Bool?
+    let requireAck: Bool?
 }
 
 final class RFCOMMDelegate: NSObject, IOBluetoothRFCOMMChannelDelegate {
@@ -143,7 +144,7 @@ final class DivoomDaemon {
         }
     }
 
-    func sendJob(packetPath: String, delay: Double, dryRun: Bool) throws -> JobResponse {
+    func sendJob(packetPath: String, delay: Double, dryRun: Bool, requireAck: Bool) throws -> JobResponse {
         let url = URL(fileURLWithPath: packetPath)
         let data = try Data(contentsOf: url)
         let packets = try parsePackets(data)
@@ -167,6 +168,9 @@ final class DivoomDaemon {
                 fflush(stdout)
             }
             RunLoop.current.run(until: Date().addingTimeInterval(delay))
+        }
+        if !requireAck {
+            return JobResponse(ok: true, message: "sent", packets: packets.count, bytes: totalBytes, sawRequest: nil, sawAck: nil)
         }
         let sawAck = waitFor(ackFrame, timeout: 4.0)
         let sawRequest = sawRequestEarly || delegate.contains(requestFrame)
@@ -204,7 +208,12 @@ final class DivoomDaemon {
                     guard let packets = req.packets else {
                         throw NSError(domain: "DivoomDaemon", code: 5, userInfo: [NSLocalizedDescriptionKey: "Missing packets path"])
                     }
-                    let resp = try self.sendJob(packetPath: packets, delay: req.delay ?? 0.012, dryRun: req.dryRun ?? false)
+                    let resp = try self.sendJob(
+                        packetPath: packets,
+                        delay: req.delay ?? 0.012,
+                        dryRun: req.dryRun ?? false,
+                        requireAck: req.requireAck ?? true
+                    )
                     self.reply(conn, resp)
                 } catch {
                     self.reply(conn, JobResponse(ok: false, message: String(describing: error), packets: nil, bytes: nil, sawRequest: nil, sawAck: nil))

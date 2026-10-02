@@ -19,8 +19,10 @@ swiftc "$TOOLS/DivoomDaemon.swift" \
   -o "$TOOLS/divoom-daemon"
 
 echo "Building menu-bar app executable..."
-swiftc "$TOOLS/DivoomMenuBar.swift" \
+swiftc "$TOOLS/AgentDashboard.swift" "$TOOLS/DivoomMenuBar.swift" \
   -framework AppKit \
+  -framework ApplicationServices \
+  -framework IOBluetooth \
   -o "$TOOLS/divoom-menubar"
 
 echo "Packaging $APP..."
@@ -30,19 +32,21 @@ mkdir -p "$MACOS" "$RESOURCES/tools"
 cp "$TOOLS/divoom-menubar" "$MACOS/DivoomMiniToo"
 cp "$TOOLS/divoom-daemon" "$RESOURCES/tools/divoom-daemon"
 cp "$TOOLS/divoom_send.py" "$RESOURCES/tools/divoom_send.py"
+cp "$TOOLS/divoom_status.py" "$RESOURCES/tools/divoom_status.py"
 cp "$TOOLS/divoom_clock.py" "$RESOURCES/tools/divoom_clock.py"
 cp "$TOOLS/send_divoom_image.py" "$RESOURCES/tools/send_divoom_image.py"
+ditto "$ROOT/agent-assets" "$RESOURCES/agent-assets"
 cp "$ROOT/PROTOCOL.md" "$RESOURCES/PROTOCOL.md"
-chmod +x "$MACOS/DivoomMiniToo" "$RESOURCES/tools/divoom-daemon"
+chmod +x "$MACOS/DivoomMiniToo" "$RESOURCES/tools/divoom-daemon" "$RESOURCES/tools/divoom_status.py"
 
 if [[ -x "$ROOT/.venv/bin/python" ]]; then
   echo "Bundling Python venv..."
   ditto "$ROOT/.venv" "$RESOURCES/.venv"
-  if [[ -L "$RESOURCES/.venv/bin/python3.14" ]]; then
-    PY_TARGET="$(realpath "$ROOT/.venv/bin/python3.14")"
-    rm "$RESOURCES/.venv/bin/python3.14"
-    cp "$PY_TARGET" "$RESOURCES/.venv/bin/python3.14"
-    chmod +x "$RESOURCES/.venv/bin/python3.14"
+  if [[ -L "$RESOURCES/.venv/bin/python3" ]]; then
+    PY_TARGET="$(realpath "$ROOT/.venv/bin/python3")"
+    rm "$RESOURCES/.venv/bin/python3"
+    cp "$PY_TARGET" "$RESOURCES/.venv/bin/python3"
+    chmod +x "$RESOURCES/.venv/bin/python3"
   fi
 else
   echo "warning: $ROOT/.venv/bin/python not found; packaged app will fall back to system python3" >&2
@@ -68,7 +72,7 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>0.2.0</string>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>LSMinimumSystemVersion</key>
